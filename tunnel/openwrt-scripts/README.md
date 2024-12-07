@@ -75,6 +75,12 @@ ssh-copy-id -i /etc/ssh-tunnels/keys/tunnel1_key.pub user@remote-server
 ### 2. 管理隧道
 
 ```bash
+# 检查系统配置状态
+tunnel-manager.sh check
+
+# 测试系统功能
+tunnel-manager.sh test
+
 # 添加新隧道
 tunnel-manager.sh add <name> <mode> <local_port> <remote_host> <remote_port> <ssh_server> <ssh_key> [extra_opts]
 
@@ -234,17 +240,41 @@ net.ipv4.tcp_keepalive_probes = 6
 
 ## 故障排查
 
-1. **隧道无法建立**
-   - 检查 SSH 密钥权限
+1. **使用 check 命令进行系统检查**
+bash
+# 检查系统配置状态
+tunnel-manager.sh check
+
+# 测试系统功能
+tunnel-manager.sh test
+
+# 测试会执行以下步骤：
+# 1. 添加测试隧道
+# 2. 检查隧道状态
+# 3. 测试停止功能
+# 4. 测试重启功能
+# 5. 测试删除功能
+
+# 如果一切正常，会看到：
+✓ 所有组件检查通过
+系统配置正常，可以正常使用。
+
+# 如果有问题，会看到具体错误信息：
+错误: 监控脚本不存在或不可执行
+错误: ssh-tunnels 服务未启用
+```
+
+2. **隧道无法建立**
+```   - 检查 SSH 密钥权限
    - 验证目标服务器连接
    - 检查端口占用情况
 
-2. **隧道经常断开**
+3. **隧道经常断开**
    - 检查网络连接稳定性
    - 调整 SSH 保活参数
    - 查看详细日志
 
-3. **服务无法启动**
+4. **服务无法启动**
    - 检查 procd 服务状态
    - 验证配置文件格式
    - 查看系统日志
