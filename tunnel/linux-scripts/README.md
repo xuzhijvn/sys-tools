@@ -1,6 +1,6 @@
-# SSH 隧道管理工具 - Linux 版本
+# SSH 隧道管理脚本 - Linux 版本
 
-这是一个用于管理多个 SSH 隧道的工具，基于 systemd 服务管理，提供自动重连、状态监控和日志记录功能。
+这是一个用于管理 SSH 隧道的 Shell 脚本，支持本地转发、远程转发和动态转发。脚本使用 systemd 服务来管理隧道，确保隧道的稳定性和自动恢复。
 
 ## 功能特点
 
@@ -11,46 +11,40 @@
 - systemd 服务集成
 - 失败重试策略
 
-## 系统要求
+## 安装
 
-- Linux 系统（支持 systemd）
-- Bash shell
-- SSH 客户端
-- netstat 工具（通常包含在 net-tools 包中）
+### root 用户安装（推荐）
 
-## 安装步骤
-
-1. **下载脚本**
 ```bash
-wget -O /usr/local/bin/tunnel-manager.sh https://your-domain.com/scripts/tunnel-manager.sh
-chmod +x /usr/local/bin/tunnel-manager.sh
-```
+# 1. 复制脚本到系统目录
+sudo cp tunnel-manager.sh /usr/local/bin/
+sudo chmod +x /usr/local/bin/tunnel-manager.sh
 
-2. **初始化系统**
-```bash
+# 2. 运行安装命令
 tunnel-manager.sh setup
 ```
-这个命令会：
-- 创建必要的目录结构
-- 创建 systemd 服务文件
-- 创建监控脚本
-- 启动监控服务
 
-## 目录结构
+### 普通用户安装
 
-```
-/etc/ssh-tunnels/
-├── configs/           # 隧道配置文件
-│   ├── tunnel1.conf
-│   └── tunnel2.conf
-├── keys/             # SSH 密钥存储
-│   ├── tunnel1_key
-│   └── tunnel2_key
-└── logs/             # 日志文件
+```bash
+# 1. 创建用户目录
+mkdir -p ~/.local/bin
+mkdir -p ~/.config/systemd/user
+mkdir -p ~/.config/ssh-tunnels/{configs,logs,keys}
 
-/usr/local/bin/
-├── tunnel-manager.sh  # 主管理脚本
-└── tunnel-monitor.sh  # 监控脚本（由setup自动创建）
+# 2. 复制脚本到用户目录
+cp tunnel-manager.sh ~/.local/bin/
+chmod +x ~/.local/bin/tunnel-manager.sh
+
+# 3. 添加到环境变量（如果还没有）
+echo 'export PATH=$PATH:$HOME/.local/bin' >> ~/.bashrc
+source ~/.bashrc
+
+# 4. 启用用户服务自动启动
+loginctl enable-linger $USER
+
+# 5. 运行安装命令
+tunnel-manager.sh setup
 ```
 
 ## 使用方法
@@ -59,95 +53,89 @@ tunnel-manager.sh setup
 
 ```bash
 # 为隧道生成专用密钥
-ssh-keygen -t ed25519 -f /etc/ssh-tunnels/keys/tunnel1_key -N ""
+ssh-keygen -t ed25519 -f ~/.ssh/tunnel_key -N ""
 
 # 复制公钥到目标服务器
-ssh-copy-id -i /etc/ssh-tunnels/keys/tunnel1_key.pub user@remote-server
+ssh-copy-id -i ~/.ssh/tunnel_key.pub user@remote-server
+
+# 设置正确的权限
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/tunnel_key
+chmod 644 ~/.ssh/tunnel_key.pub
 ```
 
-### 2. 管理隧道
+### 2. 添加隧道
 
 ```bash
-# 检查系统配置状态
-tunnel-manager.sh check
+# 本地转发（访问远程数据库）
+tunnel-manager.sh add db_tunnel L 3306 db.internal 3306 user@server ~/.ssh/tunnel_key
 
-# 测试系统功能
-tunnel-manager.sh test
+# 远程转发（暴露本地服务）
+tunnel-manager.sh add web_tunnel R 8080 localhost 80 user@server ~/.ssh/tunnel_key
 
-# 添加新隧道
-tunnel-manager.sh add <name> <mode> <local_port> <remote_host> <remote_port> <ssh_server> <ssh_key> [extra_opts]
+# 动态转发 (SOCKS 代理)
+# 对于动态转发模式，remote_host 和 remote_port 参数会被忽略，可以省略或使用任意值
+tunnel-manager.sh add proxy D 1080 "" "" user@server ~/.ssh/tunnel_key
+```
 
-# 模式说明：
-# L: 本地端口转发 (-L)
-# R: 远程端口转发 (-R)
-# D: 动态端口转发 (-D，SOCKS代理)
+### 3. 管理隧道
 
-# 示例1：本地端口转发（访问远程数据库）
-tunnel-manager.sh add db_tunnel L 3306 db.internal 3306 user@server /etc/ssh-tunnels/keys/tunnel1_key
-
-# 示例2：远程端口转发（暴露本地服务）
-tunnel-manager.sh add web_tunnel R 8080 localhost 80 user@server /etc/ssh-tunnels/keys/tunnel2_key
-
-# 示例3：动态端口转发（SOCKS代理）
-tunnel-manager.sh add proxy_tunnel D 1080 - - user@server /etc/ssh-tunnels/keys/tunnel3_key
-
-# 删除隧道
-tunnel-manager.sh remove tunnel_name
-
-# 查看所有隧道
+```bash
+# 列出所有隧道
 tunnel-manager.sh list
 
 # 查看隧道状态
 tunnel-manager.sh status
 
-# 停止隧道
-tunnel-manager.sh stop [tunnel_name]     # 不定名称则停止所有隧道
+# 停止特定隧道
+tunnel-manager.sh stop web_tunnel
 
-# 重启隧道
-tunnel-manager.sh restart [tunnel_name]   # 不指定名称则重启所有隧道
-
-# 完全清理
-tunnel-manager.sh clean                   # 清理所有隧道及相关文件、服务和配置
-```
-
-### 3. 隧道管理示例
-
-```bash
-# 1. 创建并启动一个数据库隧道
-tunnel-manager.sh add db_tunnel L 3306 db.internal 3306 user@server /etc/ssh-tunnels/keys/db_key
-
-# 2. 临时停止这个隧道
-tunnel-manager.sh stop db_tunnel
-
-# 3. 重新启动这个隧道
-tunnel-manager.sh restart db_tunnel
-
-# 4. 修改隧道配置
-tunnel-manager.sh remove db_tunnel
-tunnel-manager.sh add db_tunnel L 3307 db.internal 3306 user@server /etc/ssh-tunnels/keys/db_key
-
-# 5. 停止所有隧道
+# 停止所有隧道
 tunnel-manager.sh stop
 
-# 6. 重启所有隧道
+# 重启特定隧道
+tunnel-manager.sh restart web_tunnel
+
+# 重启所有隧道
 tunnel-manager.sh restart
 
-# 7. 完全清理系统
-tunnel-manager.sh clean   # 清理所有隧道、服务和配置文件
+# 移除隧道
+tunnel-manager.sh remove web_tunnel
+
+# 清理但保留密钥（默认行为）
+tunnel-manager.sh clean
+
+# 清理所有文件（包括密钥）
+tunnel-manager.sh clean -f
 ```
 
-### 4. 查看日志
+## 目录结构
 
-bash
-# 查看隧道服务日志
-journalctl -u ssh-tunnel@tunnel_name
+### root 用户模式
+- 配置目录：/etc/ssh-tunnels/configs/
+- 日志目录：/var/log/ssh-tunnels/
+- 密钥目录：/etc/ssh-tunnels/keys/
+- 服务目录：/etc/systemd/system/
+- 脚本目录：/usr/local/bin/
 
-# 查看监控服务日志
-journalctl -u tunnel-monitor
+### 普通用户模式
+- 配置目录：~/.config/ssh-tunnels/configs/
+- 日志目录：~/.config/ssh-tunnels/logs/
+- 密钥目录：~/.config/ssh-tunnels/keys/
+- 服务目录：~/.config/systemd/user/
+- 脚本目录：~/.local/bin/
 
-# 查看详细日志文件
-tail -f /var/log/ssh-tunnels/monitor.log
-```
+## 注意事项
+
+5. 普通用户需要确保：
+   - 已启用 lingering：`loginctl enable-linger $USER`
+   - D-Bus 服务正常运行：`systemctl --user status dbus`
+   - 用户实例已启动：`systemctl --user status`
+
+6. 如果使用 sudo -i 切换到 root 用户：
+   - 脚本会自动检测原始用户
+   - 使用原始用户的 SSH 密钥和配置
+   - 确保原始用户有正确的权限
 
 ## 配置说明
 
@@ -157,8 +145,8 @@ tail -f /var/log/ssh-tunnels/monitor.log
 TUNNEL_NAME="tunnel_name"        # 隧道名称
 TUNNEL_MODE="L"                  # 隧道模式：L(本地), R(远程), D(动态)
 LOCAL_PORT="local_port"          # 本地端口
-REMOTE_HOST="remote_host"        # 远程主机（动态模式下可忽略）
-REMOTE_PORT="remote_port"        # 远程端口（动态模式下可忽略）
+REMOTE_HOST="remote_host"        # 远程主机（动态模式下会被忽略）
+REMOTE_PORT="remote_port"        # 远程端口（动态模式下会被忽略）
 SSH_SERVER="user@server"         # SSH 服务器
 SSH_KEY="/path/to/key"          # SSH 密钥路径
 EXTRA_SSH_OPTS=""               # 额外的 SSH 选项
@@ -247,7 +235,7 @@ tunnel-manager.sh test
    - 检查端口占用情况
 
 3. **隧道经常断开**
-   - 检查网络连接稳定性
+   - 检查网络接稳定性
    - 调整 SSH 保活参数
    - 查看详细日志
 
@@ -274,6 +262,44 @@ tunnel-manager.sh test
    ```bash
    systemctl status ssh-tunnel@tunnel_name
    ```
+
+## 查看日志
+
+1. **查看隧道服务日志**
+```bash
+# 对于 root 用户
+journalctl -u ssh-tunnel@tunnel_name
+
+# 对于普通用户
+journalctl --user -u ssh-tunnel@tunnel_name
+```
+
+2. **查看监控服务日志**
+```bash
+# 对于 root 用户
+journalctl -u tunnel-monitor
+
+# 对于普通用户
+journalctl --user -u tunnel-monitor
+```
+
+3. **查看详细日志文件**
+```bash
+# 对于 root 用户
+tail -f /var/log/ssh-tunnels/monitor.log
+
+# 对于普通用户
+tail -f ~/.config/ssh-tunnels/logs/monitor.log
+```
+
+4. **实时监控日志**
+```bash
+# 对于 root 用户
+journalctl -u ssh-tunnel@tunnel_name -f
+
+# 对于普通用户
+journalctl --user -u ssh-tunnel@tunnel_name -f
+```
 
 ## 许可证
 
