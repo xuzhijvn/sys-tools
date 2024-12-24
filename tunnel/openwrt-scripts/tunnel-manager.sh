@@ -20,8 +20,9 @@ create_init_script() {
 
 START=99
 NAME=ssh-tunnels
-EXTRA_COMMANDS="status check restart_tunnel"
-EXTRA_HELP="        restart_tunnel     Restart a specific tunnel"
+EXTRA_COMMANDS="status check restart_tunnel stop_tunnel"
+EXTRA_HELP="        restart_tunnel     Restart a specific tunnel
+        stop_tunnel        Stop a specific tunnel"
 
 start_tunnel() {
     local config="$1"
@@ -330,37 +331,64 @@ test_tunnel() {
     local test_port="12345"
     echo "开始测试 SSH 隧道管理系统..."
     
-    # 确保在安全的目录中执行
-    cd /tmp || exit 1
+    # 1. 确保 Dropbear 在运行
+    echo "1. 检查 Dropbear 服务..."
+    if ! /etc/init.d/dropbear status >/dev/null 2>&1; then
+        echo "启动 Dropbear 服务..."
+        /etc/init.d/dropbear start
+        sleep 2
+    fi
     
-    # 1. 生成测试密钥
-    echo "1. 生成测试密钥..."
+    # 获取 Dropbear 监听的 IP 地址
+    local ssh_ip=$(netstat -tln | grep ':22[^0-9]' | awk '{print $4}' | cut -d: -f1)
+    if [ -z "$ssh_ip" ]; then
+        echo "❌ 无法获取 Dropbear 监听地址"
+        return 1
+    fi
+    echo "✓ Dropbear 服务正常运行在 $ssh_ip:22"
+    
+    # 2. 确保监控脚本在运行
+    echo "2. 检查监控脚本..."
+    if ! pgrep -f "/usr/bin/ssh-tunnels/monitor.sh" >/dev/null; then
+        echo "启动监控脚本..."
+        /etc/init.d/ssh-tunnels start
+        sleep 2
+        if ! pgrep -f "/usr/bin/ssh-tunnels/monitor.sh" >/dev/null; then
+            echo "❌ 监控脚本启动失败"
+            return 1
+        fi
+    fi
+    echo "✓ 监控脚本正在运行"
+    
+    # 3. 生成测试密钥
+    echo "3. 生成测试密钥..."
     if [ ! -f "/etc/ssh-tunnels/keys/test_key" ]; then
-        # 使用 dropbearkey 替代 ssh-keygen
-        dropbearkey -t ed25519 -f /etc/ssh-tunnels/keys/test_key || {
+        ssh-keygen -t ed25519 -f /etc/ssh-tunnels/keys/test_key -N "" || {
             echo "❌ 生成测试密钥失败"
             return 1
         }
-        # 导出公钥为 OpenSSH 格式
-        dropbearkey -y -f /etc/ssh-tunnels/keys/test_key | grep "^ssh-ed25519" > /etc/ssh-tunnels/keys/test_key.pub || {
-            echo "❌ 导出公钥失败"
-            return 1
-        }
-        echo "✓ 生成测试密钥成功"
+        
+        # 添加到本地的 authorized_keys
+        mkdir -p /etc/dropbear
+        chmod 700 /etc/dropbear
+        cat /etc/ssh-tunnels/keys/test_key.pub >> /etc/dropbear/authorized_keys
+        chmod 600 /etc/dropbear/authorized_keys
+        
+        echo "✓ 生成测试密钥并添加到 authorized_keys 成功"
     else
         echo "✓ 测试密钥已存在"
     fi
     
-    # 2. 测试添加隧道
-    echo "2. 测试添加隧道..."
-    setup_tunnel "$test_name" "L" "$test_port" "localhost" "22" "localhost" "/etc/ssh-tunnels/keys/test_key" || {
+    # 4. 测试添加隧道
+    echo "4. 测试添加隧道..."
+    setup_tunnel "$test_name" "L" "$test_port" "$ssh_ip" "22" "root@$ssh_ip" "/etc/ssh-tunnels/keys/test_key" || {
         echo "❌ 添加隧道失败"
         return 1
     }
     echo "✓ 添加隧道成功"
     
-    # 3. 等待隧道建立
-    echo "3. 等待隧道建立..."
+    # 5. 等待隧道建立
+    echo "5. 等待隧道建立..."
     for i in $(seq 1 10); do
         if netstat -tln | grep -q ":$test_port"; then
             echo "✓ 隧道端口正常监听"
@@ -378,8 +406,8 @@ test_tunnel() {
         sleep 1
     done
     
-    # 4. 测试停止隧道
-    echo "4. 测试停止隧道..."
+    # 6. 测试停止隧道
+    echo "6. 测试停止隧道..."
     /etc/init.d/ssh-tunnels stop_tunnel "$test_name"
     sleep 2
     if ! netstat -tln | grep -q ":$test_port"; then
@@ -389,8 +417,8 @@ test_tunnel() {
         return 1
     fi
     
-    # 5. 测试重启隧道
-    echo "5. 测试重启隧道..."
+    # 7. 测试重启隧道
+    echo "7. 测试重启隧道..."
     /etc/init.d/ssh-tunnels restart_tunnel "$test_name"
     for i in $(seq 1 10); do
         if netstat -tln | grep -q ":$test_port"; then
@@ -405,8 +433,8 @@ test_tunnel() {
         sleep 1
     done
     
-    # 6. 测试删除隧道
-    echo "6. 测试删除隧道..."
+    # 8. 测试删除隧道
+    echo "8. 测试删除隧道..."
     tunnel-manager.sh remove "$test_name"
     if [ ! -f "${TUNNEL_CONFIG_DIR}/${test_name}.conf" ]; then
         echo "✓ 隧道成功删除"
@@ -415,8 +443,8 @@ test_tunnel() {
         return 1
     fi
     
-    # 7. 清理测试密钥
-    echo "7. 清理测试密钥..."
+    # 9. 清理测试密钥
+    echo "9. 清理测试密钥..."
     rm -f "/etc/ssh-tunnels/keys/test_key" "/etc/ssh-tunnels/keys/test_key.pub"
     echo "✓ 测试密钥已清理"
     
