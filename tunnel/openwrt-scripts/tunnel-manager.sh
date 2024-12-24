@@ -98,9 +98,22 @@ restart_tunnel() {
 }
 
 start() {
+    # 确保日志目录存在
+    mkdir -p /var/log/ssh-tunnels
+    
     # 启动监控脚本
     /usr/bin/ssh-tunnels/monitor.sh >> /var/log/ssh-tunnels/monitor.log 2>&1 &
-    echo $! > "/var/run/ssh-tunnels-monitor.pid"
+    local monitor_pid=$!
+    
+    # 等待确认监控脚本启动
+    sleep 2
+    if kill -0 $monitor_pid 2>/dev/null; then
+        echo $monitor_pid > "/var/run/ssh-tunnels-monitor.pid"
+        logger -t ssh-tunnels "Monitor script started successfully (PID: $monitor_pid)"
+    else
+        logger -t ssh-tunnels "Failed to start monitor script"
+        return 1
+    fi
     
     # 启动所有隧道
     for config in /etc/ssh-tunnels/configs/*.conf; do
@@ -550,16 +563,22 @@ case "$1" in
         create_init_script
         create_monitor_script
         
-        # 4. 启动服务
+        # 4. 添加系统级监控
+        echo "添加系统级监控..."
+        echo '*/5 * * * * if ! pgrep -f "/usr/bin/ssh-tunnels/monitor.sh" >/dev/null; then /etc/init.d/ssh-tunnels start; fi' >> /etc/crontabs/root
+        /etc/init.d/cron restart
+        
+        # 5. 启动服务
         echo "启动服务..."
         /etc/init.d/ssh-tunnels enable
         /etc/init.d/ssh-tunnels start
         
-        # 5. 验证设置
+        # 6. 验证设置
         if check_setup; then
             echo "✓ 创建目录结构成功"
             echo "✓ 创建 init.d 服务脚本成功"
             echo "✓ 创建监控脚本成功"
+            echo "✓ 添加系统级监控成功"
             echo "✓ 启用服务成功"
             echo "✓ 启动服务成功"
             echo
@@ -585,7 +604,11 @@ case "$1" in
         # 2. 确保监控脚本已停止
         pkill -f "/usr/bin/ssh-tunnels/monitor.sh" 2>/dev/null
         
-        # 3. 删除所有文件
+        # 3. 删除系统级监控
+        sed -i '/ssh-tunnels\/monitor.sh/d' /etc/crontabs/root
+        /etc/init.d/cron restart
+        
+        # 4. 删除所有文件
         rm -f /etc/init.d/ssh-tunnels
         rm -rf /usr/bin/ssh-tunnels
         rm -rf /etc/ssh-tunnels
