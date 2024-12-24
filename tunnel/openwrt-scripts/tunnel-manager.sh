@@ -19,7 +19,7 @@ create_init_script() {
 #!/bin/sh /etc/rc.common
 
 START=99
-USE_PROCD=1
+NAME=ssh-tunnels
 EXTRA_COMMANDS="status check restart_tunnel"
 EXTRA_HELP="        restart_tunnel     Restart a specific tunnel"
 
@@ -27,41 +27,60 @@ start_tunnel() {
     local config="$1"
     . "$config"
     
-    procd_open_instance "$TUNNEL_NAME"
-    procd_set_param command /usr/bin/ssh
-    procd_append_param command -N
-    procd_append_param command -o "ServerAliveInterval=30"
-    procd_append_param command -o "ServerAliveCountMax=3"
-    procd_append_param command -o "ExitOnForwardFailure=yes"
-    procd_append_param command -o "TCPKeepAlive=yes"
-    procd_append_param command -o "ConnectTimeout=10"
-    procd_append_param command -o "IdentityFile=${SSH_KEY}"
-    [ -n "$EXTRA_SSH_OPTS" ] && procd_append_param command ${EXTRA_SSH_OPTS}
+    # 添加调试日志
+    logger -t ssh-tunnels "Starting tunnel: $TUNNEL_NAME"
     
+    # 启动 SSH 隧道
     case "$TUNNEL_MODE" in
         L)
-            procd_append_param command -g -L "${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}"
+            ssh -N -g -L "${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}" \
+                -o "ServerAliveInterval=30" \
+                -o "ServerAliveCountMax=3" \
+                -o "ExitOnForwardFailure=yes" \
+                -o "TCPKeepAlive=yes" \
+                -o "StrictHostKeyChecking=no" \
+                -o "IdentityFile=${SSH_KEY}" \
+                ${SSH_SERVER} >> /var/log/ssh-tunnels/${TUNNEL_NAME}.log 2>&1 &
+            
+            echo $! > "/var/run/ssh-tunnel-${TUNNEL_NAME}.pid"
             ;;
         R)
-            procd_append_param command -R "${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}"
+            ssh -N -R "${LOCAL_PORT}:${REMOTE_HOST}:${REMOTE_PORT}" \
+                -o "ServerAliveInterval=30" \
+                -o "ServerAliveCountMax=3" \
+                -o "ExitOnForwardFailure=yes" \
+                -o "TCPKeepAlive=yes" \
+                -o "StrictHostKeyChecking=no" \
+                -o "IdentityFile=${SSH_KEY}" \
+                ${SSH_SERVER} >> /var/log/ssh-tunnels/${TUNNEL_NAME}.log 2>&1 &
+            
+            echo $! > "/var/run/ssh-tunnel-${TUNNEL_NAME}.pid"
             ;;
         D)
-            procd_append_param command -D "${LOCAL_PORT}"
+            ssh -N -D "${LOCAL_PORT}" \
+                -o "ServerAliveInterval=30" \
+                -o "ServerAliveCountMax=3" \
+                -o "ExitOnForwardFailure=yes" \
+                -o "TCPKeepAlive=yes" \
+                -o "StrictHostKeyChecking=no" \
+                -o "IdentityFile=${SSH_KEY}" \
+                ${SSH_SERVER} >> /var/log/ssh-tunnels/${TUNNEL_NAME}.log 2>&1 &
+            
+            echo $! > "/var/run/ssh-tunnel-${TUNNEL_NAME}.pid"
             ;;
     esac
     
-    procd_append_param command "${SSH_SERVER}"
-    
-    procd_set_param respawn ${respawn_threshold:-3600} ${respawn_timeout:-5} ${respawn_retry:-5}
-    procd_set_param stderr 1
-    procd_set_param stdout 1
-    procd_close_instance
+    logger -t ssh-tunnels "Tunnel $TUNNEL_NAME started"
 }
 
 stop_tunnel() {
     local tunnel_name="$1"
-    local pids=$(pgrep -f "ssh.*${tunnel_name}")
-    [ -n "$pids" ] && kill $pids
+    local pid_file="/var/run/ssh-tunnel-${tunnel_name}.pid"
+    
+    if [ -f "$pid_file" ]; then
+        kill $(cat "$pid_file") 2>/dev/null
+        rm -f "$pid_file"
+    fi
 }
 
 restart_tunnel() {
@@ -71,21 +90,63 @@ restart_tunnel() {
     if [ -f "$config" ]; then
         stop_tunnel "$tunnel_name"
         start_tunnel "$config"
-        procd_commit
     else
         echo "Tunnel configuration not found: $tunnel_name"
         return 1
     fi
 }
 
-start_service() {
+start() {
+    # 启动监控脚本
+    /usr/bin/ssh-tunnels/monitor.sh >> /var/log/ssh-tunnels/monitor.log 2>&1 &
+    echo $! > "/var/run/ssh-tunnels-monitor.pid"
+    
+    # 启动所有隧道
     for config in /etc/ssh-tunnels/configs/*.conf; do
         [ -f "$config" ] && start_tunnel "$config"
     done
 }
 
-service_triggers() {
-    procd_add_reload_trigger "ssh-tunnels"
+stop() {
+    # 停止监控脚本
+    [ -f "/var/run/ssh-tunnels-monitor.pid" ] && {
+        kill $(cat "/var/run/ssh-tunnels-monitor.pid") 2>/dev/null
+        rm -f "/var/run/ssh-tunnels-monitor.pid"
+    }
+    
+    # 停止所有隧道
+    for pid_file in /var/run/ssh-tunnel-*.pid; do
+        [ -f "$pid_file" ] && {
+            kill $(cat "$pid_file") 2>/dev/null
+            rm -f "$pid_file"
+        }
+    done
+}
+
+status() {
+    local running=0
+    # 检查监控脚本
+    if [ -f "/var/run/ssh-tunnels-monitor.pid" ] && kill -0 $(cat "/var/run/ssh-tunnels-monitor.pid") 2>/dev/null; then
+        echo "Monitor script is running"
+        running=1
+    else
+        echo "Monitor script is not running"
+    fi
+    
+    # 检查所有隧道
+    for pid_file in /var/run/ssh-tunnel-*.pid; do
+        if [ -f "$pid_file" ]; then
+            name=$(basename "$pid_file" | sed 's/ssh-tunnel-\(.*\).pid/\1/')
+            if kill -0 $(cat "$pid_file") 2>/dev/null; then
+                echo "Tunnel $name is running"
+                running=1
+            else
+                echo "Tunnel $name is not running"
+            fi
+        fi
+    done
+    
+    [ $running -eq 1 ] && return 0 || return 1
 }
 EOF
 
@@ -128,6 +189,12 @@ EOF
 }
 
 create_monitor_script() {
+    # 确保目录存在
+    mkdir -p /usr/bin/ssh-tunnels
+    
+    # 先删除已存在的监控脚本
+    rm -f /usr/bin/ssh-tunnels/monitor.sh
+
     cat > /usr/bin/ssh-tunnels/monitor.sh << 'EOF'
 #!/bin/sh
 
@@ -202,6 +269,7 @@ check_tunnel() {
             else
                 log "Failed to restore tunnel $TUNNEL_NAME"
             fi
+
         fi
     else
         set_failure_count "$TUNNEL_NAME" 0
@@ -268,8 +336,14 @@ test_tunnel() {
     # 1. 生成测试密钥
     echo "1. 生成测试密钥..."
     if [ ! -f "/etc/ssh-tunnels/keys/test_key" ]; then
-        ssh-keygen -t ed25519 -f /etc/ssh-tunnels/keys/test_key -N "" || {
+        # 使用 dropbearkey 替代 ssh-keygen
+        dropbearkey -t ed25519 -f /etc/ssh-tunnels/keys/test_key || {
             echo "❌ 生成测试密钥失败"
+            return 1
+        }
+        # 导出公钥为 OpenSSH 格式
+        dropbearkey -y -f /etc/ssh-tunnels/keys/test_key | grep "^ssh-ed25519" > /etc/ssh-tunnels/keys/test_key.pub || {
+            echo "❌ 导出公钥失败"
             return 1
         }
         echo "✓ 生成测试密钥成功"
@@ -351,6 +425,31 @@ test_tunnel() {
     return 0
 }
 
+# 添加一个辅助函数来确保进程停止
+ensure_process_stopped() {
+    local pattern="$1"
+    local max_attempts=5
+    local attempt=1
+    
+    while [ $attempt -le $max_attempts ]; do
+        if ! pgrep -f "$pattern" >/dev/null 2>&1; then
+            return 0
+        fi
+        echo "尝试停止进程 ($attempt/$max_attempts)..."
+        pkill -f "$pattern" 2>/dev/null
+        [ $attempt -eq $max_attempts ] && pkill -9 -f "$pattern" 2>/dev/null
+        attempt=$((attempt + 1))
+        sleep 1
+    done
+    
+    # 检查是否还有进程存在
+    if pgrep -f "$pattern" >/dev/null 2>&1; then
+        echo "无法停止进程: $pattern"
+        return 1
+    fi
+    return 0
+}
+
 case "$1" in
     add)
         shift
@@ -404,12 +503,31 @@ case "$1" in
     setup)
         echo "开始设置 SSH 隧道管理系统..."
         
+        # 1. 确保旧的服务和进程已停止
+        echo "停止现有服务和进程..."
+        /etc/init.d/ssh-tunnels stop 2>/dev/null
+        /etc/init.d/ssh-tunnels disable 2>/dev/null
+        ensure_process_stopped "/usr/bin/ssh-tunnels/monitor.sh" || {
+            echo "无法停止监控脚本，请手动检查进程"
+            exit 1
+        }
+        
+        # 2. 清理旧文件
+        echo "清理旧文件..."
+        rm -f /etc/init.d/ssh-tunnels
+        rm -f /usr/bin/ssh-tunnels/monitor.sh
+        
+        # 3. 创建新的服务和脚本
+        echo "创建新的服务和脚本..."
         create_init_script
         create_monitor_script
-        setup_monitoring
+        
+        # 4. 启动服务
+        echo "启动服务..."
         /etc/init.d/ssh-tunnels enable
         /etc/init.d/ssh-tunnels start
         
+        # 5. 验证设置
         if check_setup; then
             echo "✓ 创建目录结构成功"
             echo "✓ 创建 init.d 服务脚本成功"
@@ -432,43 +550,18 @@ case "$1" in
     clean)
         echo "正在清理所有 SSH 隧道及相关文件..."
         
-        # 1. 停止所有隧道服务
-        echo "停止所有服务"
-        /etc/init.d/ssh-tunnels stop
-        /etc/init.d/ssh-tunnels disable
+        # 1. 停止并禁用服务
+        /etc/init.d/ssh-tunnels stop 2>/dev/null
+        /etc/init.d/ssh-tunnels disable 2>/dev/null
         
-        # 2. 删除 init.d 脚本
-        echo "删除服务脚本"
+        # 2. 确保监控脚本已停止
+        pkill -f "/usr/bin/ssh-tunnels/monitor.sh" 2>/dev/null
+        
+        # 3. 删除所有文件
         rm -f /etc/init.d/ssh-tunnels
-        
-        # 3. 删除 hotplug 脚本
-        echo "删除 hotplug 脚本"
-        rm -f /etc/hotplug.d/iface/30-ssh-tunnels
-        
-        # 4. 删除监控脚本
-        echo "删除监控脚本"
-        rm -f /usr/bin/ssh-tunnels/monitor.sh
         rm -rf /usr/bin/ssh-tunnels
-        
-        # 5. 删除配置目录
-        echo "删除配置目录"
         rm -rf /etc/ssh-tunnels
-        
-        # 6. 删除日志文件
-        echo "删除日志文件"
         rm -rf /var/log/ssh-tunnels
-        
-        # 7. 删除 cron 任务
-        echo "删除定时任务"
-        sed -i '/ssh-tunnels\/monitor.sh/d' /etc/crontabs/root
-        /etc/init.d/cron restart
-        
-        # 8. 删除持久化配置（如果存在）
-        if [ -d "/overlay/etc/ssh-tunnels" ]; then
-            echo "删除持久化配置"
-            rm -rf /overlay/etc/ssh-tunnels
-            sed -i '/ssh-tunnels/d' /etc/rc.local
-        fi
         
         echo "清理完成"
         ;;

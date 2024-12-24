@@ -22,24 +22,66 @@ chmod +x /usr/bin/tunnel-manager.sh
 tunnel-manager.sh setup
 ```
 
-### 普通用户安装
+## 密钥管理
+
+在使用隧道之前，需要先设置 SSH 密钥。OpenWRT 支持两种方式生成密钥：
+
+### 方式一：使用 OpenSSH（推荐）
+
 ```bash
-# 1. 确保有 sudo 权限
-# 编辑 /etc/sudoers，添加以下内容：
-your_username ALL=(ALL) NOPASSWD: /usr/bin/tunnel-manager.sh
-your_username ALL=(ALL) NOPASSWD: /etc/init.d/ssh-tunnels
+# 1. 安装 openssh-keygen
+opkg update
+opkg install openssh-keygen
 
-# 2. 复制脚本到用户目录
-mkdir -p ~/bin
-cp tunnel-manager.sh ~/bin/
-chmod +x ~/bin/tunnel-manager.sh
+# 2. 创建密钥目录（如果不存在）
+mkdir -p /etc/ssh-tunnels/keys
+chmod 700 /etc/ssh-tunnels/keys
 
-# 3. 添加到环境变量
-echo 'export PATH=$PATH:$HOME/bin' >> ~/.profile
-source ~/.profile
+# 3. 生成 ED25519 密钥
+ssh-keygen -t ed25519 -f /etc/ssh-tunnels/keys/tunnel_key
 
-# 4. 运行安装命令
-sudo tunnel-manager.sh setup
+# 4. 设置正确的权限
+chmod 600 /etc/ssh-tunnels/keys/tunnel_key
+chmod 644 /etc/ssh-tunnels/keys/tunnel_key.pub
+
+# 5. 将公钥复制到目标服务器
+# 查看公钥内容
+cat /etc/ssh-tunnels/keys/tunnel_key.pub
+# 然后手动将上面显示的公钥内容追加到目标服务器的 ~/.ssh/authorized_keys 文件中
+```
+
+### 方式二：使用 Dropbear（OpenWRT 默认）
+
+```bash
+# 1. 创建密钥目录（如果不存在）
+mkdir -p /etc/ssh-tunnels/keys
+chmod 700 /etc/ssh-tunnels/keys
+
+# 2. 生成 ED25519 密钥
+dropbearkey -t ed25519 -f /etc/ssh-tunnels/keys/tunnel_key
+
+# 3. 导出公钥为 OpenSSH 格式
+dropbearkey -y -f /etc/ssh-tunnels/keys/tunnel_key | grep "^ssh-ed25519" > /etc/ssh-tunnels/keys/tunnel_key.pub
+
+# 4. 设置正确的权限
+chmod 600 /etc/ssh-tunnels/keys/tunnel_key
+chmod 644 /etc/ssh-tunnels/keys/tunnel_key.pub
+
+# 5. 将公钥复制到目标服务器
+# 查看公钥内容
+cat /etc/ssh-tunnels/keys/tunnel_key.pub
+# 然后手动将上面显示的公钥内容追加到目标服务器的 ~/.ssh/authorized_keys 文件中
+```
+
+注意：
+1. 推荐使用 OpenSSH 方式生成密钥，因为它与大多数 SSH 服务器兼容性更好
+2. 如果使用 Dropbear 生成的密钥，某些情况下可能需要转换格式
+3. 建议为每个隧道使用独立的密钥对
+4. 确保密钥文件权限正确设置（密钥: 600, 公钥: 644）
+5. 可以在目标服务器上限制密钥的使用范围：
+```bash
+# 在目标服务器的 ~/.ssh/authorized_keys 中添加限制
+command="echo 'Port forwarding only'",no-agent-forwarding,no-x11-forwarding,no-pty ssh-ed25519 AAAA...
 ```
 
 ## 使用方法
@@ -47,49 +89,49 @@ sudo tunnel-manager.sh setup
 ### 添加隧道
 ```bash
 # 本地转发（访问远程数据库）
-sudo tunnel-manager.sh add db_tunnel L 3306 db.internal 3306 user@server ~/.ssh/id_ed25519
+tunnel-manager.sh add db_tunnel L 3306 db.internal 3306 user@server /etc/ssh-tunnels/keys/tunnel_key
 
 # 远程转发（暴露本地服务）
-sudo tunnel-manager.sh add web_tunnel R 8080 localhost 80 user@server ~/.ssh/id_ed25519
+tunnel-manager.sh add web_tunnel R 8080 localhost 80 user@server /etc/ssh-tunnels/keys/tunnel_key
 
 # 动态转发 (SOCKS 代理)
-sudo tunnel-manager.sh add proxy D 1080 - - user@server ~/.ssh/id_ed25519
+tunnel-manager.sh add proxy D 1080 - - user@server /etc/ssh-tunnels/keys/tunnel_key
 ```
 
 ### 管理隧道
 ```bash
 # 列出所有隧道
-sudo tunnel-manager.sh list
+tunnel-manager.sh list
 
 # 查看隧道状态
-sudo tunnel-manager.sh status
+tunnel-manager.sh status
 
 # 停止特定隧道
-sudo tunnel-manager.sh stop web_tunnel
+tunnel-manager.sh stop web_tunnel
 
 # 停止所有隧道
-sudo tunnel-manager.sh stop
+tunnel-manager.sh stop
 
 # 重启特定隧道
-sudo tunnel-manager.sh restart web_tunnel
+tunnel-manager.sh restart web_tunnel
 
 # 重启所有隧道
-sudo tunnel-manager.sh restart
+tunnel-manager.sh restart
 
 # 移除隧道
-sudo tunnel-manager.sh remove web_tunnel
+tunnel-manager.sh remove web_tunnel
 ```
 
 ### 系统管理
 ```bash
 # 检查系统配置
-sudo tunnel-manager.sh check
+tunnel-manager.sh check
 
 # 测试系统功能
-sudo tunnel-manager.sh test
+tunnel-manager.sh test
 
 # 清理所有配置
-sudo tunnel-manager.sh clean
+tunnel-manager.sh clean
 ```
 
 ## 目录结构
@@ -102,25 +144,12 @@ sudo tunnel-manager.sh clean
 
 ## 注意事项
 
-1. 普通用户需要 sudo 权限才能执行脚本
-2. 使用前请确保 SSH 密钥已正确配置：
-```bash
-# 生成密钥
-ssh-keygen -t ed25519 -f ~/.ssh/tunnel_key
-
-# 复制公钥到目标服务器
-ssh-copy-id -i ~/.ssh/tunnel_key.pub user@server
-
-# 设置正确的权限
-chmod 700 ~/.ssh
-chmod 600 ~/.ssh/tunnel_key
-chmod 644 ~/.ssh/tunnel_key.pub
-```
-
+1. 建议为每个隧道使用独立的密钥对
+2. 确保密钥文件权限正确设置（密钥: 600, 公钥: 644）
 3. 本地转发模式(-L)默认启用网关模式(-g)，允许其他设备通过 OpenWRT 访问隧道
-
-4. 可以在目标服务器的 authorized_keys 中限制命令：
+4. 可以在目标服务器上限制密钥的使用范围：
 ```bash
+# 在目标服务器的 ~/.ssh/authorized_keys 中添加限制
 command="echo 'Port forwarding only'",no-agent-forwarding,no-x11-forwarding,no-pty ssh-ed25519 AAAA...
 ```
 
@@ -150,4 +179,3 @@ MIT License
 ## 作者
 
 xuzhijvn
-``` 
